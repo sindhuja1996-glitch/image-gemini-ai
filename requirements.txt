@@ -5,3 +5,4 @@ requests
 google-genai
 langchain-groq
 google-generativeai
+langgraph
