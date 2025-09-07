@@ -4,6 +4,7 @@ from io import BytesIO
 from PIL import Image
 import streamlit as st
 import urllib.parse
+import uuid
 
 from langchain_groq import ChatGroq
 import google.generativeai as genai
@@ -30,7 +31,7 @@ gemini_image = genai.GenerativeModel("gemini-2.5-flash-image-preview")
 # Groq Models
 llm_reasoning = ChatGroq(api_key=groq_api_key, model="llama-3.3-70b-versatile", temperature=0)
 llm_fast = ChatGroq(api_key=groq_api_key, model="gemma2-9b-it", temperature=0)
-llm_backup = ChatGroq(api_key=groq_api_key, model="llama-3.1-8b-instant", temperature=0)
+llm_backup = ChatGroq(api_key=groq_api_key, model="groq/compound", temperature=0)
 
 # --- Step 2: Define Tools with proper docstrings ---
 @tool
@@ -139,38 +140,81 @@ def get_tool_name(query):
 
 st.title("Multi-Tool Agent")
 
-if 'history' not in state:
-    state.history = []
+# --- Session Management ---
+if 'conversations' not in state:
+    state.conversations = {}
+if 'current_conversation' not in state:
+    # Create a new conversation with a UUID
+    new_id = str(uuid.uuid4())
+    state.current_conversation = new_id
+    state.conversations[new_id] = []
+
+# Sidebar for conversation navigation
+st.sidebar.title("Conversations")
+conversation_ids = list(state.conversations.keys())
+selected_id = st.sidebar.radio(
+    "Select a conversation:",
+    conversation_ids,
+    index=conversation_ids.index(state.current_conversation) if state.current_conversation in conversation_ids else 0
+)
+if st.sidebar.button("New Conversation"):
+    new_id = str(uuid.uuid4())
+    state.current_conversation = new_id
+    state.conversations[new_id] = []
+    st.rerun()
+if selected_id != state.current_conversation:
+    state.current_conversation = selected_id
+    st.rerun()
+
+# Use current conversation's history
+history = state.conversations[state.current_conversation]
 
 # Display chat history
-for q, a, tool_name in state.history:
-    # Question right, then answer left (with image above text if present)
+for idx, (q, a, tool_name) in enumerate(history):
     st.markdown(f"<div style='text-align:right;margin-bottom:2px;width:70%;margin-left:auto;background-color:#f0f0f0;padding:8px;border-radius:6px;'><b>Question:</b> {q}</div>", unsafe_allow_html=True)
     if tool_name == "generate_image_gemini_tool" and isinstance(a, dict):
         answer_text = a.get("text", "")
         img_bytes = a.get("image")
         if img_bytes:
             st.image(img_bytes, caption="Generated Image", use_column_width=True)
+            # Download button
+            st.download_button(
+                label="⬇️ Download Image",
+                data=img_bytes,
+                file_name=f"generated_image_{idx}.png",
+                mime="image/png",
+                key=f"download_{idx}_{state.current_conversation}"
+            )
+            # WhatsApp share link
+            whatsapp_text = f"Here is an AI generated image.\n{answer_text}\n"
+            import urllib.parse
+            whatsapp_encoded = urllib.parse.quote(whatsapp_text)
+            whatsapp_url = f"https://wa.me/?text={whatsapp_encoded}"
+            st.markdown(f"[📲 Share on WhatsApp]({whatsapp_url})", unsafe_allow_html=True)
         st.markdown(f"<div style='text-align:left;margin-bottom:16px;width:70%;background-color:#e0f7fa;padding:8px;border-radius:6px;'><b>Tool Used:</b> {tool_name}<br><b>Answer:</b> {answer_text}</div>", unsafe_allow_html=True)
     else:
         st.markdown(f"<div style='text-align:left;margin-bottom:16px;width:70%;background-color:#e0f7fa;padding:8px;border-radius:6px;'><b>Tool Used:</b> {tool_name}<br><b>Answer:</b> {a}</div>", unsafe_allow_html=True)
 
+# --- Fix textarea clearing by using a unique key for the input textarea after each send, so Streamlit resets the field. This avoids session_state mutation errors and preserves all working code.
+if 'input_key' not in state:
+    state.input_key = 'input_0'
+
 # Move textarea to bottom
 st.markdown("<div style='height:30vh;'></div>", unsafe_allow_html=True)
-user_input = st.text_area("Enter your query:", height=40, key="input", help="Type your question here",
-                         placeholder="Ask something...",
-                         )
+
+user_input = st.text_area(
+    "Enter your query:", height=40, key=state.input_key, help="Type your question here", placeholder="Ask something..."
+)
 
 if st.button("Send") and user_input.strip():
     tool_name = get_tool_name(user_input)
     with st.spinner(f"Calling {tool_name}..."):
         response = tool_router(user_input)
-        # Clear input workaround: set a dummy key
-        st.text_area("Enter your query:", value="", key="input_clear", height=40, help="Type your question here", placeholder="Ask something...", disabled=True)
-        # If image tool, store dict so chat history can render image above text
         if tool_name == "generate_image_gemini_tool" and isinstance(response, dict):
-            state.history.append((user_input, response, tool_name))
-            st.rerun()
+            history.append((user_input, response, tool_name))
         else:
-            state.history.append((user_input, str(response), tool_name))
-            st.rerun()
+            history.append((user_input, str(response), tool_name))
+        # Change input_key to force Streamlit to reset textarea
+        idx = int(state.input_key.split('_')[1]) + 1
+        state.input_key = f'input_{idx}'
+        st.rerun()
